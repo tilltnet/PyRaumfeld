@@ -83,11 +83,69 @@ __dataProcessedEvent = threading.Event()
 
 __sessionUUID = uuid4().hex
 __mediaServerUDN = ""
+__mediaServerLocation = ""
 __callback = None
 
 hostBaseURL = "http://hostip:47365"
 #logging.basicConfig(level=logging.INFO)
 socket.setdefaulttimeout(None)
+
+class MediaServer(object):
+    """Raumfeld MediaServer"""
+
+    def __init__(self, udn, location):
+        self._udn = udn
+        #self._name = name
+        self._location = location
+        scheme, netloc, _, _, _, _ = urllib2.urlparse.urlparse(location)
+        self._address = '{0}://{1}'.format(scheme, netloc)
+        # ToDo: get correct ControlLocation from the XML file
+        self._contentDirectory = SoapClient(
+            location='{0}/cd/Control'.format(self._address),
+            action='urn:schemas-upnp-org:service:ContentDirectory:1#',
+            namespace='http://schemas.xmlsoap.org/soap/envelope/',
+            soap_ns='soap', ns='s', exceptions=False)
+
+    # Browse and Search
+    def browse(self, id_, flag = "BrowseMetadata", filter = "*", count = "25"):
+        """Browse Media Server"""
+        return self._contentDirectory.Browse(ObjectID = id_, BrowseFlag = flag,
+            Filter = filter, StartingIndex = "0", RequestedCount = count, SortCriteria = "").Result
+
+    def browse_children(self, id_, filter = "*", count = "25"):
+        """Convenience function for browsing child elements; returns Result and NumberReturned"""
+        children = self._contentDirectory.Browse(ObjectID = id_, BrowseFlag = "BrowseDirectChildren",
+            Filter = filter, StartingIndex = "0", RequestedCount = count, SortCriteria = "")
+        result = children.Result
+        count_returned = children.NumberReturned
+        return result, count_returned
+
+    def search(self, id_, criteria, filter = "*", count = "25"):
+        """Search Media Server"""
+        return self._contentDirectory.Search(ContainerID = id_, SearchCriteria = criteria,
+            Filter = filter, StartingIndex = "0", RequestedCount = count, SortCriteria = "").Result
+
+    # Queue Operations
+    def create_queue(self, desired_name, container_id):
+        """CreateQueue Returns GivenName and QueueID"""
+        self._contentDirectory.CreateQueue(DesiredName = desired_name, ContainerID = container_id)
+
+    def add_container(self, queue_id, container_id, source_id = "", criteria = "", start_index = "0", end_index = "0", position = "0"):
+        """AddContainerToQueue"""
+        self._contentDirectory.AddContainerToQueue(QueueID = queue_id, ContainerID = container_id,
+            SourceID = source_id, SearchCriteria = criteria, StartIndex = start_index, EndIndex = end_index, Position = position)
+
+    def add_item(self, queue_id, object_id, position):
+        """AddItemToQueue"""
+        self._contentDirectory.AddItemToQueue(QueueID = queue_id, ObjectID = object_id, Position = position)
+
+    def move_in_queue(self, object_id, new_position):
+        """MoveInQueue"""
+        self._contentDirectory.MoveInQueue(ObjectID = object_id, NewPosition = new_position)
+
+    def remove_from_queue(self, queue_id, from_position, to_position):
+        """RemoveFromQueue"""
+        self._contentDirectory.RemoveFromQueue(QueueID = queue_id, FromPosition = from_position, ToPosition = to_position)
 
 class Zone(object):
     """Raumfeld Zone"""
@@ -157,6 +215,11 @@ class Zone(object):
         else:
             self._avTransport.Play(InstanceID=1, Speed=2)
 
+    def bend(self, uri=None, meta=None):
+        """BendAVTransportURI"""
+        self._avTransport.BendAVTransportURI(
+            InstanceID=0, CurrentURI=uri, CurrentURIMetaData=meta)
+
     def next(self):
         """Next"""
         self._avTransport.Next(InstanceID=1)
@@ -213,6 +276,28 @@ class Zone(object):
     def uri_metadata(self):
         """Get CurrentURIMetaData"""
         return self._avTransport.GetMediaInfo(InstanceID=1).CurrentURIMetaData
+
+    @property
+    def media_info(self):
+        """Get TrackURI"""
+        info = self._avTransport.GetMediaInfo(InstanceID=1)
+        media_dic = {'tracks' : info.NrTracks,
+            'media_duration' : info.MediaDuration,
+            'uri_metadata' : info.CurrentURIMetaData,
+            'uri' : info.CurrentURI}
+        return media_dic
+
+    @property
+    def position_info(self):
+        """Get TrackURI"""
+        info = self._avTransport.GetPositionInfo(InstanceID=1)
+        pos_dic = {'track' : info.Track,
+            'track_duration' : info.TrackDuration,
+            'track_metadata' : info.TrackMetaData,
+            'track_uri' : info.TrackURI,
+            'rel_time' : info.RelTime,
+            'abs_time' : info.AbsTime}
+        return pos_dic
 
     @property
     def track_uri(self):
@@ -418,7 +503,7 @@ class Renderer(object):
 
 def __listDevicesThread():
     """Thread for LongPolling the listDevices Web-Service of Raumfeld"""
-    global hostBaseURL, __newDeviceDataEvent, __dataProcessedEvent, __deviceElements, __deviceElementsLock
+    global hostBaseURL, __newDeviceDataEvent, __dataProcessedEvent, __deviceElements, __deviceElementsLock, __mediaServerUDN, __mediaServerLocation, __mediaServer
     listDevices_updateID = ''
 
     while True:
@@ -436,7 +521,9 @@ def __listDevicesThread():
 
             for device_element in __deviceElements:
                 if device_element.childNodes[0].nodeValue == "Raumfeld MediaServer":
-                    __mediaServerUDN = device_element.getAttribute("udn")
+                    __mediaServerUDN =  device_element.getAttribute("udn")
+                    __mediaServerLocation = device_element.getAttribute("location")
+                    __mediaServer = MediaServer(__mediaServerUDN, __mediaServerLocation)
                     break
 
             # signal changes
